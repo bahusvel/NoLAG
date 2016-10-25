@@ -17,7 +17,7 @@ struct __advertise_frame {
 
 typedef union {
 	struct __advertise_frame frame;
-	char data[sizeof(struct __advertise_frame)];
+	unsigned char data[sizeof(struct __advertise_frame)];
 } advertise_frame;
 
 static mac_map_entry mac_map;
