@@ -7,7 +7,7 @@
 #include <sys/ioctl.h>
 #include <unistd.h>
 
-int tun_alloc(char *dev) {
+int tap_alloc(char *dev) {
 
 	struct ifreq ifr;
 	int fd, err;
@@ -23,6 +23,7 @@ int tun_alloc(char *dev) {
 	if (*dev) {
 		strncpy(ifr.ifr_name, dev, IFNAMSIZ);
 	}
+
 	if ((err = ioctl(fd, TUNSETIFF, (void *)&ifr)) < 0) {
 		close(fd);
 		return err;

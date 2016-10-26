@@ -1,16 +1,13 @@
 #define _GNU_SOURCE
 
+#include "socket.h"
 #include <arpa/inet.h>
 #include <assert.h>
 #include <inttypes.h>
-#include <linux/if_ether.h>
-#include <linux/if_packet.h>
 #include <linux/ip.h>
 #include <net/if.h>
 #include <netdb.h>
-#include <poll.h>
 #include <signal.h>
-#include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -18,29 +15,8 @@
 #include <sys/socket.h>
 #include <unistd.h>
 
-#ifndef likely
-#define likely(x) __builtin_expect(!!(x), 1)
-#endif
-#ifndef unlikely
-#define unlikely(x) __builtin_expect(!!(x), 0)
-#endif
-
-struct block_desc {
-	uint32_t version;
-	uint32_t offset_to_priv;
-	struct tpacket_hdr_v1 h1;
-};
-
-struct ring {
-	struct iovec *rd;
-	uint8_t *map;
-	struct tpacket_req3 req;
-};
-
 static unsigned long packets_total = 0, bytes_total = 0;
 static sig_atomic_t sigint = 0;
-
-static void sighandler(int num) { sigint = 1; }
 
 static int setup_socket(struct ring *ring, char *netdev) {
 	int err, i, fd, v = TPACKET_V3;
@@ -106,33 +82,8 @@ static int setup_socket(struct ring *ring, char *netdev) {
 	return fd;
 }
 
-static void display(struct tpacket3_hdr *ppd) {
-	struct ethhdr *eth = (struct ethhdr *)((uint8_t *)ppd + ppd->tp_mac);
-	struct iphdr *ip = (struct iphdr *)((uint8_t *)eth + ETH_HLEN);
-
-	if (eth->h_proto == htons(ETH_P_IP)) {
-		struct sockaddr_in ss, sd;
-		char sbuff[NI_MAXHOST], dbuff[NI_MAXHOST];
-
-		memset(&ss, 0, sizeof(ss));
-		ss.sin_family = PF_INET;
-		ss.sin_addr.s_addr = ip->saddr;
-		getnameinfo((struct sockaddr *)&ss, sizeof(ss), sbuff, sizeof(sbuff),
-					NULL, 0, NI_NUMERICHOST);
-
-		memset(&sd, 0, sizeof(sd));
-		sd.sin_family = PF_INET;
-		sd.sin_addr.s_addr = ip->daddr;
-		getnameinfo((struct sockaddr *)&sd, sizeof(sd), dbuff, sizeof(dbuff),
-					NULL, 0, NI_NUMERICHOST);
-
-		printf("%s -> %s, ", sbuff, dbuff);
-	}
-
-	printf("rxhash: 0x%x\n", ppd->hv1.tp_rxhash);
-}
-
-static void walk_block(struct block_desc *pbd, const int block_num) {
+static void walk_block(struct block_desc *pbd, const int block_num,
+					   packet_callback callback) {
 	int num_pkts = pbd->h1.num_pkts, i;
 	unsigned long bytes = 0;
 	struct tpacket3_hdr *ppd;
@@ -140,7 +91,8 @@ static void walk_block(struct block_desc *pbd, const int block_num) {
 	ppd = (struct tpacket3_hdr *)((uint8_t *)pbd + pbd->h1.offset_to_first_pkt);
 	for (i = 0; i < num_pkts; ++i) {
 		bytes += ppd->tp_snaplen;
-		display(ppd);
+
+		callback(ppd);
 
 		ppd = (struct tpacket3_hdr *)((uint8_t *)ppd + ppd->tp_next_offset);
 	}
@@ -153,62 +105,41 @@ static void flush_block(struct block_desc *pbd) {
 	pbd->h1.block_status = TP_STATUS_KERNEL;
 }
 
-static void teardown_socket(struct ring *ring, int fd) {
-	munmap(ring->map, ring->req.tp_block_size * ring->req.tp_block_nr);
-	free(ring->rd);
-	close(fd);
+struct packet_socket setup_interface(char *ifname, packet_callback callback) {
+	struct packet_socket socket = {0};
+	socket.callback = callback;
+
+	socket.fd = setup_socket(&socket.ring, ifname);
+	assert(socket.fd > 0);
+
+	socket.pfd.fd = socket.fd;
+	socket.pfd.events = POLLIN | POLLERR;
+	socket.pfd.revents = 0;
+
+	return socket;
 }
 
-int main(int argc, char **argp) {
-	int fd, err;
-	socklen_t len;
-	struct ring ring;
-	struct pollfd pfd;
-	unsigned int block_num = 0, blocks = 64;
-	struct block_desc *pbd;
-	struct tpacket_stats_v3 stats;
+static void sighandler(int num) { sigint = 1; }
 
-	if (argc != 2) {
-		fprintf(stderr, "Usage: %s INTERFACE\n", argp[0]);
-		return EXIT_FAILURE;
-	}
-
+void start_listen(struct packet_socket *sockets, int num_sockets) {
 	signal(SIGINT, sighandler);
-
-	memset(&ring, 0, sizeof(ring));
-	fd = setup_socket(&ring, argp[argc - 1]);
-	assert(fd > 0);
-
-	memset(&pfd, 0, sizeof(pfd));
-	pfd.fd = fd;
-	pfd.events = POLLIN | POLLERR;
-	pfd.revents = 0;
-
+	struct block_desc *pbd;
+	unsigned int blocks = 64;
+	unsigned int *blocknum;
+	struct pollfd pfds[num_sockets];
+	for (int i = 0; i < num_sockets; i++) {
+		pfds[i] = sockets[i].pfd;
+	}
 	while (likely(!sigint)) {
-		pbd = (struct block_desc *)ring.rd[block_num].iov_base;
-
-		if ((pbd->h1.block_status & TP_STATUS_USER) == 0) {
-			poll(&pfd, 1, -1);
-			continue;
+		for (int i = 0; i < num_sockets; i++) {
+			blocknum = &sockets[i].blocknum;
+			pbd = (struct block_desc *)sockets[i].ring.rd[*blocknum].iov_base;
+			if ((pbd->h1.block_status & TP_STATUS_USER) != 0) {
+				walk_block(pbd, *blocknum, sockets[i].callback);
+				flush_block(pbd);
+				*blocknum = (*blocknum + 1) % blocks;
+			}
 		}
-
-		walk_block(pbd, block_num);
-		flush_block(pbd);
-		block_num = (block_num + 1) % blocks;
+		poll(pfds, num_sockets, -1);
 	}
-
-	len = sizeof(stats);
-	err = getsockopt(fd, SOL_PACKET, PACKET_STATISTICS, &stats, &len);
-	if (err < 0) {
-		perror("getsockopt");
-		exit(1);
-	}
-
-	fflush(stdout);
-	printf("\nReceived %u packets, %lu bytes, %u dropped, freeze_q_cnt: %u\n",
-		   stats.tp_packets, bytes_total, stats.tp_drops,
-		   stats.tp_freeze_q_cnt);
-
-	teardown_socket(&ring, fd);
-	return 0;
 }

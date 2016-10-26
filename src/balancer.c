@@ -1,18 +1,16 @@
+#include "balancer.h"
 #include "list.h"
-#include <inttypes.h>
 #include <stdlib.h>
-
-#define MAX_SLAVES 8
 
 typedef struct mac_map_entry {
 	uint64_t key_mac;
-	uint64_t master_mac;
+	endpoint *endpoint;
 	struct mac_map_entry *next;
 } mac_map_entry;
 
 struct __advertise_frame {
 	uint64_t master_mac;
-	uint64_t slave_macs[MAX_SLAVES];
+	MacAddr slave_macs[MAX_SLAVES];
 };
 
 typedef union {
@@ -22,11 +20,11 @@ typedef union {
 
 static mac_map_entry mac_map;
 
-uint64_t is_present(int64_t key_mac) {
+endpoint *lookup(MacAddr key_mac) {
 	mac_map_entry *iter_ptr;
 	LIST_FOREACH(iter_ptr, mac_map) {
-		if (iter_ptr->key_mac == key_mac)
-			return iter_ptr->master_mac;
+		if (iter_ptr->key_mac == key_mac.key64)
+			return iter_ptr->endpoint;
 	}
-	return 0;
+	return NULL;
 }
