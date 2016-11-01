@@ -5,7 +5,7 @@ CFLAGS = -W -Wall -Wextra -O2 -g -std=c99 -pthread -Iinclude
 LDFLAGS = -shared -ldl
 
 
-all: clean cryptomalloc
+all: clean socket
 
 clean:
 	rm -f *.o *.so binencrypt monitor core segment_test
